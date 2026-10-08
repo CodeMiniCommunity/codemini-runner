@@ -17,8 +17,9 @@
     var hostOrigin = null, nonce = null;
     var page = document.getElementById('page');
     var minted = Object.create(null);                              // blob: URLs this shell made
-    var shown = 0;                                                 // id of the latest 'show' request
+    var shown = 0, current = '';                                   // current: the blob URL the frame is known to be showing                                                 // id of the latest 'show' request
     var MAX_BLOB = 256 * 1024 * 1024;
+    var SHOW_MS = 4000;                                            // how long a frame may stay blank before we call the page failed
 
     function allowed(origin) { return CFG.allowedParents.indexOf(origin) !== -1; }
     function send(msg) {
@@ -45,12 +46,47 @@
             (Array.isArray(d.urls) ? d.urls : []).forEach(function (u) { if (minted[u]) { URL.revokeObjectURL(u); delete minted[u]; } });
         } else if (d.op === 'show') {
             if (typeof d.url !== 'string' || !minted[d.url]) { send({ cmRunner: 1, op: 'shown', id: d.id, error: 'unknown url' }); return; }
-            shown = d.id;
-            var mine = d.id;
-            page.onload = function () { if (mine === shown) send({ cmRunner: 1, op: 'shown', id: mine }); };
+            shown = d.id; current = '';
+            var mine = d.id, want = d.url, done = false, deadline = Date.now() + SHOW_MS, timer = null;
+            // Report once the frame really shows OUR page. The first `load` event can belong to the frame's old
+            // about:blank (WebKit fires it), so events alone prove nothing: look at what the frame holds.
+            //   our page, finished  -> loaded         our page, still going at the deadline -> loaded
+            //   foreign / unreachable (blocked)  -> failed at once        still blank at the deadline -> failed
+            var finish = function (error) {
+                if (done) return; done = true; clearInterval(timer); page.onload = null;
+                if (mine !== shown) return;
+                send(error ? { cmRunner: 1, op: 'shown', id: mine, error: 'the page did not load: ' + error } : { cmRunner: 1, op: 'shown', id: mine });
+            };
+            var look = function () {
+                if (done) return;
+                if (mine !== shown) { finish(); return; }
+                var w, doc;
+                try { w = page.contentWindow; doc = w && w.document; }
+                catch (err) { finish('the frame is not reachable (' + (err && err.name) + ')'); return; }
+                var here = '';
+                try { here = (doc && doc.documentElement) ? w.location.href : ''; }
+                catch (err) { finish('the frame is not reachable (' + (err && err.name) + ')'); return; }
+                if (here === want) { if (doc.readyState === 'complete' || Date.now() >= deadline) { current = want; finish(); } return; }
+                if (Date.now() >= deadline) finish(here ? 'the frame still shows ' + here.split(':')[0] + ': after ' + (SHOW_MS / 1000) + ' s' : 'the frame stayed empty for ' + (SHOW_MS / 1000) + ' s');
+            };
+            page.onload = look;
+            timer = setInterval(look, 100);
             page.src = d.url;
+        } else if (d.op === 'rewrite') {
+            // The "in-place rewrite" reload mode: write new HTML into the document that is already showing, keeping its
+            // window. Only possible while the frame still holds a page we put there (same origin as this shell).
+            try {
+                var rw = page.contentWindow, rdoc = rw && rw.document;
+                if (typeof d.html !== 'string' || d.html.length > MAX_BLOB) throw new Error('bad html');
+                if (!current || !rdoc || !rdoc.documentElement || rw.location.href !== current) throw new Error('no page to rewrite');
+                rdoc.open(); rdoc.write(d.html); rdoc.close();
+                // document.open() makes the document adopt THIS script's address, so that is what the frame shows now;
+                // remember it, or the next rewrite would think the page had been replaced.
+                current = rw.location.href;
+                send({ cmRunner: 1, op: 'rewritten', id: d.id });
+            } catch (err) { send({ cmRunner: 1, op: 'rewritten', id: d.id, error: String(err && err.message || err) }); }
         } else if (d.op === 'clear') {
-            shown = 0; page.onload = null; page.src = 'about:blank';
+            current = ''; shown = 0; page.onload = null; page.src = 'about:blank';
         }
     }
 

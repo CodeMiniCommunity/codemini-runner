@@ -3,7 +3,7 @@
     {
       "source": "/(.*)",
       "headers": [
-        { "key": "Content-Security-Policy", "value": "frame-ancestors https://the-code-mini-ide.vercel.app" },
+        { "key": "Content-Security-Policy", "value": "frame-ancestors 'self' https://the-code-mini-ide.vercel.app" },
         { "key": "X-Content-Type-Options", "value": "nosniff" },
         { "key": "Cache-Control", "value": "public, max-age=0, must-revalidate" }
       ]
